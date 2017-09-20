@@ -1,0 +1,13 @@
+{
+	"name": "discv",
+	"authors": [
+		"Luís Marques"
+	],
+	"dependencies": {
+        "elf-d": "~>0.2.1",
+        "derelict-sdl2": "~>3.0.0-alpha.4"
+	},
+	"description": "RISC-V emulator",
+	"copyright": "Copyright © 2017, Luís Marques",
+	"license": "proprietary"
+}
