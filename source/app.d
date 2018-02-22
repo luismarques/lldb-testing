@@ -1,20 +1,31 @@
 import std.algorithm;
 import std.file;
 import std.math : abs;
+import std.path;
 import std.range;
 import std.stdio;
 import std.string;
 import elf;
 
 //version = Trace;
+//version = TraceLoad;
 version = GFX;
 
-version(all)
+version(none)
+{
+    enum memMax = 0x80004000;
+    enum systemAddr = 0xFFFF_FFFF;
+}
+else version(all)
+{
     enum memMax = 0x80_0000;
+    enum systemAddr = 0x8000_0000;
+}
 else
+{
     enum memMax = 0x000000007fbecda0;
-
-enum systemAddr = 0x8000_0000;
+    enum systemAddr = 0x8000_0000;
+}
 
 struct RISCV32
 {
@@ -22,10 +33,19 @@ struct RISCV32
     uint pc;
 }
 
+struct Symbol
+{
+    ulong addr;
+    ulong size;
+    string name;
+    int count;
+}
+
 struct System
 {
     RISCV32 cpu;
-    ubyte[] mem;    
+    ubyte[] mem;
+    version(Profile) Symbol[] symbols;
 }
 
 void writeMem(ubyte[] mem, uint addr, ubyte[] values)
@@ -60,7 +80,7 @@ ubyte read8(System* system, uint address)
         (&system.cpu).printRegs();
         throw new Exception("stop");
     }
-    
+
     auto r = system.mem.u8(address);
     version(Trace) writefln("READ8 %08X %08X", address, r);
     return r;
@@ -130,7 +150,7 @@ void write8(System* system, uint address, ubyte value)
         throw new Exception("stop");
     }
 
-    if(address != 0x8000_0000)
+    if(address != systemAddr)
         system.mem.u8(address) = value;
     else
     {
@@ -169,7 +189,7 @@ void write16(System* system, uint address, ushort value)
         throw new Exception("stop");
     }
 
-    assert(address < 0x8000_0000);
+    assert(address < memMax);
     system.mem.u16(address) = value;
 }
 
@@ -187,16 +207,28 @@ void write32(System* system, uint address, uint value)
 
     if((address & 0b11) != 0)
     {
-        writeln("unaligned store");
+        writefln("unaligned store to %08X", address);
         (&system.cpu).printRegs();
         throw new Exception("stop");
     }
 
-    assert(address < 0x8000_0000);
+    assert(address < memMax);
     system.mem.u32(address) = value;
 }
 
-void load(System* system)
+version(Profile)
+Symbol* findSymbol(System* system, ulong addr)
+{
+    foreach(ref symbol; system.symbols)
+    {
+        if(addr >= symbol.addr && addr < symbol.addr + symbol.size)
+            return &symbol;
+    }
+
+    return null;
+}
+
+void load(System* system, string elfFile)
 {
     alias uint32_t = uint;
 
@@ -212,16 +244,27 @@ void load(System* system)
       uint32_t p_align;
     }
 
-    enum elfFile = "/Users/luismarques/Projects/empire4/empire";
     ELF e = ELF.fromFile(elfFile);
-    
+
     enum section = ".symtab";
 	ELFSection s = e.getSection(section);
 
     foreach(symbol; SymbolTable(s).symbols())
     {
+        version(Profile)
+        {
+            Symbol sym;
+            sym.addr = symbol.value;
+            sym.size = symbol.size;
+            sym.name = symbol.name;
+            system.symbols ~= sym;
+        }
+
         if(symbol.name == "_D8graphics12_frameBufferG1310720h")
+        {
 		    frameBufferAddress = cast(uint)symbol.value;
+            writefln("Framebuffer at %X", frameBufferAddress);
+        }
     }
 
     auto pho = e.header.programHeaderOffset;
@@ -248,7 +291,7 @@ void load(System* system)
             writeFileEnd++;
         }
 
-        writefln("WRITE %X - %X (%X - %X)", writeStart, writeEnd, writeFileStart, writeFileEnd);
+        version(TraceLoad) writefln("WRITE %X - %X (%X - %X)", writeStart, writeEnd, writeFileStart, writeFileEnd);
         system.mem.writeMem(writeStart, bin[writeFileStart .. writeFileEnd]);
 
         auto zeroStart = p.p_vaddr + p.p_filesz;
@@ -268,7 +311,7 @@ void load(System* system)
         while((zeros.length & 0b1111) != 0)
             zeros ~= 0;
 
-        writefln("CLEAR %X - %X", zeroStart, zeroEnd);
+        version(TraceLoad) writefln("CLEAR %X - %X", zeroStart, zeroEnd);
         system.mem.writeMem(zeroStart, zeros);
     }
 }
@@ -349,8 +392,6 @@ auto rn(int reg)
     return regNames[reg];
 }
 
-bool[0x80_0000] once;
-
 void execute(System* system)
 {
     RISCV32* cpu = &system.cpu;
@@ -360,7 +401,14 @@ void execute(System* system)
     //foreach(cycle; 0..100_000)
     while(true)
     {
-        version(GFX) if(cycle++ % 2_000_000 == 0)
+        version(Profile) if(cycle % 100_000 == 0)
+        {
+            auto sym = system.findSymbol(system.cpu.pc);
+            if(sym)
+                sym.count++;
+        }
+
+        version(GFX) if(cycle % 2_000_000 == 0)
         {
             SDL_Event e;
 
@@ -370,16 +418,16 @@ void execute(System* system)
                 {
                     case SDL_QUIT:
                         throw new Exception("Quit");
-                
+
                     case SDL_KEYUP:
                     case SDL_KEYDOWN:
                         break;
-                    
+
                     default:
                 }
             }
 
-            if(cycle % 10_000_000 == 1)
+            if(cycle % 10_000_000 == 0)
                 system.refresh();
         }
 
@@ -410,11 +458,12 @@ void execute(System* system)
         {
             case 0b0110111:
             {
-                version(Trace) trace(cpu.pc, inst, "lui", "%s, 0x%x", rd.rn, cast(uint)uimm >> 12);
-                cpu.regs[rd] = uimm;
+                version(Trace) trace(cpu.pc, inst, "lui", "%s, 0x%x", rd.rn, uimm >>> 12);
+                if(rd != 0)
+                    cpu.regs[rd] = uimm;
                 break;
             }
-            
+
             case 0b1101111:
             {
                 int jimm = inst.bits!(31, 31);
@@ -579,7 +628,7 @@ void execute(System* system)
                     default:
                         assert(0);
                 }
-                
+
                 break;
             }
 
@@ -623,15 +672,14 @@ void execute(System* system)
                         break;
                     }
 
-                    /+
                     case 0b101:
                     {
+                        version(Trace) trace(cpu.pc, inst, "lhu", "%s, %s(%s)", rd.rn, iimm, rs1.rn);
                         auto v = system.read16(cpu.regs[rs1] + iimm);
                         if(rd != 0)
                             cpu.regs[rd] = v;
                         break;
                     }
-                    +/
 
                     default:
                         assert(0);
@@ -731,23 +779,20 @@ void execute(System* system)
                     case 0b001:
                     {
                         version(Trace) trace(cpu.pc, inst, "slli", "%s, %s, %s", rd.rn, rs1.rn, shamt);
-                        assert(shamt < 32 && shamt > 0);
-                        r = cpu.regs[rs1] << shamt;
+                        r = cpu.regs[rs1] << (shamt & 31);
                         break;
                     }
 
                     case 0b101:
                     {
                         if(inst.bits!(30, 30) == 0)
-                        {    
+                        {
                             version(Trace) trace(cpu.pc, inst, "srli", "%s, %s, %s", rd.rn, rs1.rn, shamt);
-                            assert(shamt < 32 && shamt > 0);
-                            r = cpu.regs[rs1] >> shamt;
+                            r = cpu.regs[rs1] >> (shamt & 31);
                         }
                         else
-                        {    
-                            assert(shamt < 32 && shamt > 0);
-                            r = (cast(int)cpu.regs[rs1]) >> shamt;
+                        {
+                            r = (cast(int)cpu.regs[rs1]) >> (shamt & 31);
                         }
 
                         break;
@@ -760,7 +805,7 @@ void execute(System* system)
 
                 if(rdz)
                     cpu.regs[rd] = r;
-        
+
                 break;
             }
 
@@ -769,66 +814,118 @@ void execute(System* system)
                 auto rdz = rd != 0;
                 uint r;
 
-                switch(funct3)
+                if(inst.bits!(25, 25) == 1)
                 {
-                    case 0b000:
+                    switch(funct3)
                     {
-                        if(inst.bits!(30, 30) == 0)
+                        case 0b000:
                         {
-                            version(Trace) trace(cpu.pc, inst, "add", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
-                            r = cpu.regs[rs1] + cpu.regs[rs2];
+                            r = cast(int)cpu.regs[rs1] * cast(int)cpu.regs[rs2];
                             break;
                         }
-                        else
+
+                        case 0b001:
                         {
-                            version(Trace) trace(cpu.pc, inst, "sub", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
-                            r = cpu.regs[rs1] - cpu.regs[rs2];
+                            r = cast(uint)((cast(long)cpu.regs[rs1] * cast(long)cpu.regs[rs2]) >> 32);
                             break;
                         }
-                    }
 
-                    case 0b001:
+                        case 0b011:
+                        {
+                            r = cast(uint)((cast(ulong)cpu.regs[rs1] * cast(ulong)cpu.regs[rs2]) >> 32);
+                            break;
+                        }
+
+                        case 0b100:
+                        {
+                            r = cast(int)cpu.regs[rs1] / cast(int)cpu.regs[rs2];
+                            break;
+                        }
+
+                        case 0b111:
+                        {
+                            r = cpu.regs[rs1] % cpu.regs[rs2];
+                            break;
+                        }
+
+                        default:
+                            writeln("funct3: ", funct3);
+                            enforce(0);
+                            assert(0);
+                    }
+                }
+                else
+                {
+                    switch(funct3)
                     {
-                        assert(cpu.regs[rs2] < 32);
-                        r = cpu.regs[rs1] << cpu.regs[rs2];
-                        break;
+                        case 0b000:
+                        {
+                            if(inst.bits!(30, 30) == 0)
+                            {
+                                version(Trace) trace(cpu.pc, inst, "add", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
+                                r = cpu.regs[rs1] + cpu.regs[rs2];
+                                break;
+                            }
+                            else
+                            {
+                                version(Trace) trace(cpu.pc, inst, "sub", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
+                                r = cpu.regs[rs1] - cpu.regs[rs2];
+                                break;
+                            }
+                        }
+                    
+                        case 0b001:
+                        {
+                            r = cpu.regs[rs1] << (cpu.regs[rs2] & 31);
+                            break;
+                        }
+                    
+                        case 0b010:
+                        {
+                            version(Trace) trace(cpu.pc, inst, "slt", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
+                            r = cast(int)cpu.regs[rs1] < cast(int)cpu.regs[rs2] ? 1 : 0;
+                            break;
+                        }
+                    
+                        case 0b011:
+                        {
+                            r = cpu.regs[rs1] < cpu.regs[rs2] ? 1 : 0;
+                            break;
+                        }
+                    
+                        case 0b100:
+                        {
+                            r = cpu.regs[rs1] ^ cpu.regs[rs2];
+                            break;
+                        }
+                    
+                        case 0b101:
+                        {
+                            if(inst.bits!(30, 30) == 0)
+                                r = cpu.regs[rs1] >> (cpu.regs[rs2] & 31);
+                            else
+                                r = cast(int)cpu.regs[rs1] >> (cpu.regs[rs2] & 31);
+                            break;
+                        }
+                    
+                        case 0b110:
+                        {
+                            version(Trace) trace(cpu.pc, inst, "or", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
+                            r = cpu.regs[rs1] | cpu.regs[rs2];
+                            break;
+                        }
+                    
+                        case 0b111:
+                        {
+                            r = cpu.regs[rs1] & cpu.regs[rs2];
+                            break;
+                        }
+                    
+                        default:
+                            writeln("funct3: ", funct3);
+                            enforce(0);
+                            assert(0);
                     }
-
-                    case 0b010:
-                    {
-                        version(Trace) trace(cpu.pc, inst, "slt", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
-                        r = cast(int)cpu.regs[rs1] < cast(int)cpu.regs[rs2] ? 1 : 0;
-                        break;
-                    }
-
-                    case 0b011:
-                    {
-                        r = cpu.regs[rs1] < cpu.regs[rs2] ? 1 : 0;
-                        break;
-                    }
-
-                    case 0b100:
-                    {
-                        r = cpu.regs[rs1] ^ cpu.regs[rs2];
-                        break;
-                    }
-
-                    case 0b110:
-                    {
-                        version(Trace) trace(cpu.pc, inst, "or", "%s, %s, %s", rd.rn, rs1.rn, rs2.rn);
-                        r = cpu.regs[rs1] | cpu.regs[rs2];
-                        break;
-                    }
-
-                    case 0b111:
-                    {
-                        r = cpu.regs[rs1] & cpu.regs[rs2];
-                        break;
-                    }
-
-                    default:
-                        writeln("funct3: ", funct3);
-                        assert(0);
                 }
 
                 if(rdz)
@@ -837,7 +934,12 @@ void execute(System* system)
                 break;
             }
 
-            case 0b1110011:
+            case 0b0001111: // FENCE
+            {
+                break;
+            }
+
+            case 0b1110011: // ECALL, EBREAK, etc
             {
                 if(cpu.regs[17] == 64)
                 {
@@ -846,25 +948,28 @@ void execute(System* system)
 
                     foreach(i; 0..len)
                     {
-                        char c = system.read8(ptr+i);                        
+                        char c = system.read8(ptr+i);
                         write(c);
                     }
                 }
                 else
                     return;
-                
+
                 break;
             }
 
-            case 0b0010111:
+            case 0b0010111: // AUIPC
             {
-                // TODO: AUIPC
-                assert(0);
+                if(rd != 0)
+                    cpu.regs[rd] = uimm + cpu.pc;
+
+                break;
             }
-            
+
             default:
                 writefln("%08X: %08X", cpu.pc, inst);
                 cpu.printRegs();
+                enforce(0);
                 assert(0);
         }
 
@@ -873,27 +978,84 @@ void execute(System* system)
 
         //if(cycle % 1000 == 0) cpu.printRegs();
         //cpu.printRegs();
+
+        ++cycle;
     }
 }
 
+//version=test;
+version=empire;
+
 void main()
 {
-    version(trace) log = File("trace-discv.txt", "w");
+    version(empire) runEmpire();
+    version(test) runStressTests();
+}
+
+void runEmpire()
+{
+    version(Trace) log = File("trace-discv.txt", "w");
+
+    initGraphics();
 
     __gshared System sys;
 
     sys.mem = new ubyte[memMax];
-    (&sys).load();
+
+    enum elfFile = "/Users/luismarques/Projects/empire4/empire";
+
+    (&sys).load(elfFile);
 
     sys.cpu.pc = 0x2000;
+
     sys.cpu.regs[2] = 0x000000007fbecda0;
     sys.cpu.regs[2] = 0x6C_0000;
 
-    initGraphics();
-
-    (&sys.cpu).printRegs();
+    //(&sys.cpu).printRegs();
 
     (&sys).execute();
+
+    version(Profile)
+    {
+        sys.symbols.sort!((a, b) => a.count < b.count);    
+        sys.symbols.filter!(a => a.count > 0).each!writeln();
+    }
+}
+
+void runStressTests()
+{
+    version(Trace) log = File("trace-discv.txt", "w");
+
+    initGraphics();
+
+    foreach(DirEntry e; dirEntries("/Users/luismarques/Projects/riscv/riscv-tests/isa", SpanMode.shallow))
+    {
+        if(!e.name.baseName.startsWith("rv32ui-p-") || e.name.endsWith(".dump"))
+        {
+            continue;
+        }
+
+        __gshared System sys;
+
+        sys.mem = new ubyte[memMax];
+
+        auto elfFile = e.name;
+
+        std.stdio.write(elfFile, " ");
+        stdout.flush();
+
+        (&sys).load(elfFile);
+
+        sys.cpu.pc = 0x800000fc;
+
+        (&sys).execute();
+
+        auto gp = sys.cpu.regs[3];
+        if(gp == 1)
+            writeln("PASS");
+        else
+            writefln("FAIL %d", gp);
+    }
 }
 
 import derelict.sdl2.sdl;
@@ -912,28 +1074,29 @@ auto initGraphics()
 {
     version(GFX)
     {
-    DerelictSDL2.load();
+        DerelictSDL2.load();
 
-    enforce(SDL_Init(SDL_INIT_EVERYTHING) == 0);
+        enforce(SDL_Init(SDL_INIT_EVERYTHING) == 0);
 
-    window = SDL_CreateWindow(
-        "RISC-V",
-        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        width, height,
-        SDL_WINDOW_SHOWN);
+        window = SDL_CreateWindow(
+            "RISC-V",
+            SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            width, height,
+            SDL_WINDOW_SHOWN);
 
-    enforce(window !is null);
+        enforce(window !is null);
 
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    enforce(renderer !is null);
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+        enforce(renderer !is null);
 
-    SDL_RenderClear(renderer);
+        SDL_RenderClear(renderer);
 
-    texture = SDL_CreateTexture(
-        renderer,
-        SDL_PIXELFORMAT_RGB332,
-        SDL_TEXTUREACCESS_STREAMING,
-        width, height);}
+        texture = SDL_CreateTexture(
+            renderer,
+            SDL_PIXELFORMAT_RGB332,
+            SDL_TEXTUREACCESS_STREAMING,
+            width, height);
+    }
 }
 
 void refresh(System* system)
