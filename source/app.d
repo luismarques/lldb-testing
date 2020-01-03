@@ -73,7 +73,7 @@ ref uint u32(ubyte[] mem, uint addr)
 
 ubyte read8(System* system, uint address)
 {
-    if(address < systemAddr && address >= memMax)
+    if(address < systemAddr && address >= memMax || address < 0x1000)
     {
         writefln("READ8 %08X", address);
         writeln("segfault");
@@ -88,7 +88,7 @@ ubyte read8(System* system, uint address)
 
 ushort read16(System* system, uint address)
 {
-    if(address < systemAddr && address >= memMax)
+    if(address < systemAddr && address >= memMax || address < 0x1000)
     {
         writefln("READ16 %08X", address);
         writeln("segfault");
@@ -111,7 +111,7 @@ ushort read16(System* system, uint address)
 
 uint read32(System* system, uint address)
 {
-    if(address < systemAddr && address >= memMax)
+    if(address < systemAddr && address >= memMax || address < 0x1000)
     {
         writefln("READ32 %08X", address);
         writeln("segfault");
@@ -143,20 +143,21 @@ void write8(System* system, uint address, ubyte value)
 {
     version(Trace) writefln("WRITE8 %08X %X", address, value);
 
-    if(address < systemAddr && address >= memMax)
+    if(address < systemAddr && address >= memMax || address < 0x1000)
     {
         writeln("segfault");
         (&system.cpu).printRegs();
         throw new Exception("stop");
     }
 
-    if(address != systemAddr)
+    if(address < systemAddr)
         system.mem.u8(address) = value;
     else
     {
         version(all)
         {
-            write(cast(char) value);
+            if(address == systemAddr) // UART
+                write(cast(char) value);
         }
         else
         {
@@ -175,7 +176,7 @@ void write16(System* system, uint address, ushort value)
 {
     version(Trace) writefln("WRITE16 %08X %X", address, value);
 
-    if(address < systemAddr && address >= memMax)
+    if(address < systemAddr && address >= memMax || address < 0x1000)
     {
         writeln("segfault");
         (&system.cpu).printRegs();
@@ -197,7 +198,7 @@ void write32(System* system, uint address, uint value)
 {
     version(Trace) writefln("WRITE32 %08X %X", address, value);
 
-    if(address < systemAddr && address >= memMax)
+    if(address < systemAddr && address >= memMax || address < 0x1000)
     {
         writefln("WRITE32 %08X %X", address, value);
         writeln("segfault");
@@ -392,6 +393,26 @@ auto rn(int reg)
     return regNames[reg];
 }
 
+void eventLoop()
+{
+    SDL_Event e;
+
+    while(SDL_PollEvent(&e))
+    {
+        switch(e.type)
+        {
+            case SDL_QUIT:
+                throw new Exception("Quit");
+
+            case SDL_KEYUP:
+            case SDL_KEYDOWN:
+                break;
+
+            default:
+        }
+    }
+}
+
 void execute(System* system)
 {
     RISCV32* cpu = &system.cpu;
@@ -410,22 +431,7 @@ void execute(System* system)
 
         version(GFX) if(cycle % 2_000_000 == 0)
         {
-            SDL_Event e;
-
-            while(SDL_PollEvent(&e))
-            {
-                switch(e.type)
-                {
-                    case SDL_QUIT:
-                        throw new Exception("Quit");
-
-                    case SDL_KEYUP:
-                    case SDL_KEYDOWN:
-                        break;
-
-                    default:
-                }
-            }
+            eventLoop();
 
             if(cycle % 10_000_000 == 0)
                 system.refresh();
@@ -952,8 +958,19 @@ void execute(System* system)
                         write(c);
                     }
                 }
-                else
+                else if(cpu.regs[17] == 93)
+                {
                     return;
+                }
+                else
+                {
+                    version(GFX)
+                    {
+                        while(1)
+                            //SDL_Delay(1_000);
+                            eventLoop();
+                    }
+                }
 
                 break;
             }
@@ -986,13 +1003,18 @@ void execute(System* system)
 //version=test;
 version=empire;
 
-void main()
+void main(string[] args)
 {
-    version(empire) runEmpire();
+    string execname;
+    
+    if(args.length > 1)
+        execname = args[1];
+
+    version(empire) runExecutable(execname);
     version(test) runStressTests();
 }
 
-void runEmpire()
+void runExecutable(string execname)
 {
     version(Trace) log = File("trace-discv.txt", "w");
 
@@ -1002,14 +1024,28 @@ void runEmpire()
 
     sys.mem = new ubyte[memMax];
 
-    enum elfFile = "/Users/luismarques/Projects/empire4/empire";
+    auto elfFile = execname ? execname : "/home/luismarques/Projects/luis/empire4/empire";
 
     (&sys).load(elfFile);
 
-    sys.cpu.pc = 0x2000;
+    sys.cpu.pc = 0x1000;
 
-    sys.cpu.regs[2] = 0x000000007fbecda0;
+    //sys.cpu.regs[2] = 0x000000007fbecda0;
     sys.cpu.regs[2] = 0x6C_0000;
+
+    version(MemDump)
+    {
+        auto f = File("logimem.txt", "w");
+        
+        f.writeln("v2.0 raw");
+        foreach(i; 0 .. 0x290000/4)
+        {
+            auto v = (&sys).read32(i*4);
+            f.writefln("%X", v);
+        }
+        if(execname)
+            return;
+    }
 
     //(&sys.cpu).printRegs();
 
@@ -1068,7 +1104,7 @@ SDL_Texture* texture;
 enum width = 1280;
 enum height = 1024;
 
-uint frameBufferAddress = 0;
+uint frameBufferAddress = 0x6C0000;
 
 auto initGraphics()
 {
