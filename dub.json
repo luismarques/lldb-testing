@@ -5,7 +5,7 @@
 	],
 	"dependencies": {
         "elf-d": "~>0.2.1",
-        "derelict-sdl2": "~>3.1.0-alpha.3"
+        "bindbc-sdl": "~>0.13.0"
 	},
 	"description": "RISC-V emulator",
 	"copyright": "Copyright © 2017, Luís Marques",

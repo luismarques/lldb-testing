@@ -1094,7 +1094,7 @@ void runStressTests()
     }
 }
 
-import derelict.sdl2.sdl;
+import bindbc.sdl;
 import std.exception : enforce;
 
 SDL_Window* window;
@@ -1110,7 +1110,11 @@ auto initGraphics()
 {
     version(GFX)
     {
-        DerelictSDL2.load();
+        SDLSupport ret = loadSDL();
+        if(ret != sdlSupport)
+        {
+            writeln(stderr, "Failed to load SDL");
+        }
 
         enforce(SDL_Init(SDL_INIT_EVERYTHING) == 0);
 
