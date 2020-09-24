@@ -1,13 +1,10 @@
 {
 	"name": "discv",
-	"authors": [
-		"Luís Marques"
-	],
+	"description": "RISC-V emulator",
 	"dependencies": {
         "elf-d": "~>0.2.1",
         "bindbc-sdl": "~>0.13.0"
 	},
-	"description": "RISC-V emulator",
-	"copyright": "Copyright © 2017, Luís Marques",
-	"license": "proprietary"
+	"stringImportPaths": ["."]
+
 }
